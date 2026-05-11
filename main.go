@@ -1,8 +1,11 @@
 package main
 
 import (
+	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,6 +20,31 @@ var (
 	todos  = []Todo{}
 	nextID = 1
 )
+
+func loggerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		duration := time.Since(start)
+		log.Printf("[%d] %s %s — %v",
+			c.Writer.Status(),
+			c.Request.Method,
+			c.Request.URL.Path,
+			duration,
+		)
+	}
+}
+
+func apiKeyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.GetHeader("X-API-Key")
+		if key == "" || key != os.Getenv("API_KEY") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing API key"})
+			return
+		}
+		c.Next()
+	}
+}
 
 func getTodos(c *gin.Context) {
 	c.JSON(http.StatusOK, todos)
@@ -98,18 +126,19 @@ func deleteTodo(c *gin.Context) {
 func main() {
 	r := gin.Default()
 
-	r.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
-	})
-
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"pong": true})
 	})
 
-	r.GET("/todos", getTodos)
-	r.POST("/todos", createTodo)
-	r.PUT("/todos/:id", updateTodo)
-	r.DELETE("/todos/:id", deleteTodo)
+	v1 := r.Group("/api/v1")
+	v1.Use(loggerMiddleware())
+	v1.Use(apiKeyMiddleware())
+	{
+		v1.GET("/todos", getTodos)
+		v1.POST("/todos", createTodo)
+		v1.PUT("/todos/:id", updateTodo)
+		v1.DELETE("/todos/:id", deleteTodo)
+	}
 
 	r.Run(":8080")
 }
