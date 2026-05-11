@@ -1,0 +1,16 @@
+# Binaries
+gin-server
+*.exe
+*.out
+
+# Go build cache
+/vendor/
+
+# Environment variables
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
