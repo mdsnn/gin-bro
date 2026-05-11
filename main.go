@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type Todo struct {
@@ -16,10 +19,32 @@ type Todo struct {
 	Done  bool   `json:"done"`
 }
 
-var (
-	todos  = []Todo{}
-	nextID = 1
-)
+var db *sql.DB
+
+func initDB() {
+	var err error
+	db, err = sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal("failed to connect to database:", err)
+	}
+
+	if err = db.Ping(); err != nil {
+		log.Fatal("database unreachable:", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS todos (
+			id    SERIAL PRIMARY KEY,
+			title TEXT NOT NULL,
+			done  BOOLEAN NOT NULL DEFAULT FALSE
+		)
+	`)
+	if err != nil {
+		log.Fatal("failed to create table:", err)
+	}
+
+	log.Println("database connected and ready")
+}
 
 func loggerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -47,7 +72,24 @@ func apiKeyMiddleware() gin.HandlerFunc {
 }
 
 func getTodos(c *gin.Context) {
-	c.JSON(http.StatusOK, todos)
+	rows, err := db.Query("SELECT id, title, done FROM todos ORDER BY id")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	result := []Todo{}
+	for rows.Next() {
+		var t Todo
+		if err := rows.Scan(&t.ID, &t.Title, &t.Done); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		result = append(result, t)
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 func createTodo(c *gin.Context) {
@@ -60,14 +102,15 @@ func createTodo(c *gin.Context) {
 		return
 	}
 
-	todo := Todo{
-		ID:    nextID,
-		Title: input.Title,
-		Done:  false,
+	var todo Todo
+	err := db.QueryRow(
+		"INSERT INTO todos (title, done) VALUES ($1, $2) RETURNING id, title, done",
+		input.Title, false,
+	).Scan(&todo.ID, &todo.Title, &todo.Done)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-
-	todos = append(todos, todo)
-	nextID++
 
 	c.JSON(http.StatusCreated, todo)
 }
@@ -89,20 +132,34 @@ func updateTodo(c *gin.Context) {
 		return
 	}
 
-	for i, todo := range todos {
-		if todo.ID == id {
-			if input.Title != "" {
-				todos[i].Title = input.Title
-			}
-			if input.Done != nil {
-				todos[i].Done = *input.Done
-			}
-			c.JSON(http.StatusOK, todos[i])
-			return
-		}
+	var todo Todo
+	err = db.QueryRow("SELECT id, title, done FROM todos WHERE id = $1", id).
+		Scan(&todo.ID, &todo.Title, &todo.Done)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "todo not found"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "todo not found"})
+	if input.Title != "" {
+		todo.Title = input.Title
+	}
+	if input.Done != nil {
+		todo.Done = *input.Done
+	}
+
+	err = db.QueryRow(
+		"UPDATE todos SET title = $1, done = $2 WHERE id = $3 RETURNING id, title, done",
+		todo.Title, todo.Done, id,
+	).Scan(&todo.ID, &todo.Title, &todo.Done)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, todo)
 }
 
 func deleteTodo(c *gin.Context) {
@@ -112,18 +169,29 @@ func deleteTodo(c *gin.Context) {
 		return
 	}
 
-	for i, todo := range todos {
-		if todo.ID == id {
-			todos = append(todos[:i], todos[i+1:]...)
-			c.JSON(http.StatusOK, gin.H{"message": "todo deleted"})
-			return
-		}
+	result, err := db.Exec("DELETE FROM todos WHERE id = $1", id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "todo not found"})
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "todo not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "todo deleted"})
 }
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("no .env file found, using system env")
+	}
+
+	initDB()
+	defer db.Close()
+
 	r := gin.Default()
 
 	r.GET("/ping", func(c *gin.Context) {
